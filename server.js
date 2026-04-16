@@ -2,50 +2,77 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
-// Serve static files from the public directory
 app.use(express.static(path.join(__dirname, 'public')));
-
-// Set up trust proxy for accurate IP logging if hosted behind Cloudflare / Render
 app.set('trust proxy', true);
 
 // -------------------------------------------------------------
-// IN-MEMORY DATABASES (Multi-Tenant Architecture)
+// DATABASE SETUP (MongoDB vs In-Memory Fallback)
 // -------------------------------------------------------------
-// We store bins in memory. In a fully-persisted app, you'd swap this object for MongoDB/Redis.
-// Data Structure:
-// bins = {
-//   "bin-id-xyz": {
-//     createdAt: 167...,
-//     endpoints: { "GET-/test": { ... } },
-//     history: [ { ... } ]
-//   }
-// }
+let useMongo = false;
+
+// Mongoose Schemas
+const endpointSchema = new mongoose.Schema({
+    binId: { type: String, required: true, index: true },
+    method: String,
+    path: String,
+    responseStatus: Number,
+    responseBody: String,
+    useRandom: Boolean,
+    key: String,
+});
+const Endpoint = mongoose.model('Endpoint', endpointSchema);
+
+const historySchema = new mongoose.Schema({
+    binId: { type: String, required: true, index: true },
+    timestamp: { type: Date, default: Date.now },
+    method: String,
+    path: String,
+    headers: Object,
+    body: Object,
+    query: Object,
+    ip: String
+});
+const History = mongoose.model('History', historySchema);
+
+if (MONGO_URI) {
+    mongoose.connect(MONGO_URI)
+        .then(() => {
+            console.log('✅ Connected to MongoDB Cloud');
+            useMongo = true;
+        })
+        .catch(err => console.log('❌ MongoDB connection error:', err));
+} else {
+    console.log('⚠️ No MONGO_URI provided. Falling back to IN-MEMORY storage.');
+}
+
+// Memory Fallback
 const bins = {};
-
 const MAX_HISTORY_PER_BIN = 100;
-const BIN_EXPIRY_MS = 24 * 60 * 60 * 1000; // Auto-delete bins after 24 hours array
-
-// Cleanup cronjob to prevent memory leaks in production
+const BIN_EXPIRY_MS = 24 * 60 * 60 * 1000;
 setInterval(() => {
+    if (useMongo) return;
     const now = Date.now();
     for (const binId in bins) {
-        if (now - bins[binId].createdAt > BIN_EXPIRY_MS) {
-            delete bins[binId];
-        }
+        if (now - bins[binId].createdAt > BIN_EXPIRY_MS) delete bins[binId];
     }
-}, 60 * 60 * 1000); // Check every hour
+}, 60 * 60 * 1000);
+
+function getOrCreateBinMemory(binId) {
+    if (!bins[binId]) bins[binId] = { createdAt: Date.now(), endpoints: {}, history: [] };
+    return bins[binId];
+}
 
 // -------------------------------------------------------------
 // HELPER FUNCTIONS
 // -------------------------------------------------------------
-
 function generateRandomData() {
     const types = ['string', 'number', 'boolean', 'object', 'array'];
     const type = types[Math.floor(Math.random() * types.length)];
@@ -58,133 +85,123 @@ function generateRandomData() {
     }
 }
 
-// Middleware to get or initialize a bin
-function getOrCreateBin(binId) {
-    if (!bins[binId]) {
-        bins[binId] = {
-            createdAt: Date.now(),
-            endpoints: {},
-            history: []
-        };
-    }
-    return bins[binId];
-}
-
 // -------------------------------------------------------------
-// DASHBOARD API (For the frontend app)
+// DASHBOARD API
 // -------------------------------------------------------------
-
-// 1. Claim a new bin or validate existing
 app.post('/api/bins', (req, res) => {
     let { binId } = req.body;
-    
-    // If user provided a custom binId, try to use it. Clean it to be safe.
-    if (binId) {
-        binId = binId.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
-    }
-    
-    // If no binId, or it was invalid, generate a random one
-    if (!binId) {
-        binId = crypto.randomBytes(4).toString('hex'); // e.g. "a1b2c3d4"
-    }
+    if (binId) binId = binId.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
+    if (!binId) binId = crypto.randomBytes(4).toString('hex');
 
-    // Initialize it so we have a creation date
-    getOrCreateBin(binId);
+    if (!useMongo) getOrCreateBinMemory(binId);
 
-    // Return the server's public base URL so the frontend knows where it is hosted
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.get('host');
-    const baseUrl = `${protocol}://${host}`;
-
-    res.json({ binId, baseUrl });
+    res.json({ binId, baseUrl: `${protocol}://${host}` });
 });
 
-// Middleware to inject the active bin details into the request
-function requireBin(req, res, next) {
-    const binId = req.params.binId || req.headers['x-bin-id'];
-    if (!binId) return res.status(400).json({ error: 'Missing bin context' });
-    req.binId = binId.toLowerCase();
-    req.bin = getOrCreateBin(req.binId);
-    next();
-}
-
-// 2. Dashboard Endpoints Routes
-app.get('/api/b/:binId/endpoints', requireBin, (req, res) => {
-    res.json(Object.values(req.bin.endpoints));
+app.get('/api/b/:binId/endpoints', async (req, res) => {
+    const binId = req.params.binId.toLowerCase();
+    if (useMongo) {
+        const eps = await Endpoint.find({ binId });
+        res.json(eps.map(e => ({ ...e.toObject(), id: e._id })));
+    } else {
+        res.json(Object.values(getOrCreateBinMemory(binId).endpoints));
+    }
 });
 
-app.post('/api/b/:binId/endpoints', requireBin, (req, res) => {
+app.post('/api/b/:binId/endpoints', async (req, res) => {
+    const binId = req.params.binId.toLowerCase();
     const { method, path, responseStatus, responseBody, useRandom } = req.body;
-    const id = Date.now().toString();
     const cleanPath = path.startsWith('/') ? path : '/' + path;
     const key = `${method}-${cleanPath}`;
-    
-    req.bin.endpoints[key] = {
-        id,
-        method,
-        path: cleanPath,
-        responseStatus: parseInt(responseStatus) || 200,
-        responseBody: responseBody || '{}',
-        useRandom: !!useRandom,
-        key
-    };
-    res.json({ success: true, endpoint: req.bin.endpoints[key] });
-});
 
-app.delete('/api/b/:binId/endpoints/:id', requireBin, (req, res) => {
-    const { id } = req.params;
-    for (const key in req.bin.endpoints) {
-        if (req.bin.endpoints[key].id === id) {
-            delete req.bin.endpoints[key];
-            return res.json({ success: true });
-        }
+    const data = { method, path: cleanPath, responseStatus: parseInt(responseStatus) || 200, responseBody: responseBody || '{}', useRandom: !!useRandom, key, binId };
+
+    if (useMongo) {
+        await Endpoint.findOneAndDelete({ binId, key }); // Prevent duplicate routes
+        const ep = await Endpoint.create(data);
+        res.json({ success: true, endpoint: { ...ep.toObject(), id: ep._id } });
+    } else {
+        const bin = getOrCreateBinMemory(binId);
+        data.id = Date.now().toString();
+        bin.endpoints[key] = data;
+        res.json({ success: true, endpoint: bin.endpoints[key] });
     }
-    res.status(404).json({ error: 'Endpoint not found' });
 });
 
-app.get('/api/b/:binId/history', requireBin, (req, res) => {
-    res.json(req.bin.history);
+app.delete('/api/b/:binId/endpoints/:id', async (req, res) => {
+    const binId = req.params.binId.toLowerCase();
+    if (useMongo) {
+        await Endpoint.findByIdAndDelete(req.params.id);
+        res.json({ success: true });
+    } else {
+        const bin = getOrCreateBinMemory(binId);
+        for (const k in bin.endpoints) {
+            if (bin.endpoints[k].id === req.params.id) {
+                delete bin.endpoints[k];
+                return res.json({ success: true });
+            }
+        }
+        res.status(404).json({ error: 'Not found' });
+    }
 });
 
-app.delete('/api/b/:binId/history', requireBin, (req, res) => {
-    req.bin.history = [];
+app.get('/api/b/:binId/history', async (req, res) => {
+    const binId = req.params.binId.toLowerCase();
+    if (useMongo) {
+        const history = await History.find({ binId }).sort({ timestamp: -1 }).limit(MAX_HISTORY_PER_BIN);
+        res.json(history);
+    } else {
+        res.json(getOrCreateBinMemory(binId).history);
+    }
+});
+
+app.delete('/api/b/:binId/history', async (req, res) => {
+    const binId = req.params.binId.toLowerCase();
+    if (useMongo) {
+        await History.deleteMany({ binId });
+    } else {
+        getOrCreateBinMemory(binId).history = [];
+    }
     res.json({ success: true });
 });
 
 // -------------------------------------------------------------
 // THE MOCK INTERCEPTOR API
 // -------------------------------------------------------------
-
-// Path looks like /b/:binId/... (/b/a1b2c3d4/my/test/api)
-app.all('/b/:binId/*', (req, res) => {
+app.all('/b/:binId/*', async (req, res) => {
     const binId = req.params.binId.toLowerCase();
-    const bin = getOrCreateBin(binId);
-
-    // Extract the requested mock path after the binId
-    // req.path includes the full path like /b/uuid/users/1
-    // We strip off /b/uuid part to get /users/1
     const prefixLength = `/b/${binId}`.length;
     const requestPath = req.path.substring(prefixLength) || '/';
     const method = req.method;
     const key = `${method}-${requestPath}`;
 
-    // Record the live request history
-    const historyEntry = {
-        id: Date.now().toString(),
-        timestamp: new Date().toISOString(),
-        method,
-        path: requestPath,
-        headers: req.headers,
-        body: req.body,
-        query: req.query,
-        ip: req.ip
-    };
-    
-    bin.history.unshift(historyEntry);
-    if (bin.history.length > MAX_HISTORY_PER_BIN) bin.history.pop();
+    const historyData = { binId, method, path: requestPath, headers: req.headers, body: req.body, query: req.query, ip: req.ip };
 
-    // Check if the mock rule exists
-    const endpoint = bin.endpoints[key];
+    let endpoint = null;
+    
+    if (useMongo) {
+        // Run DB saving asynchronously so we don't block the mock response
+        History.create(historyData).then(async () => {
+             // Keep limits strictly
+             const count = await History.countDocuments({ binId });
+             if (count > MAX_HISTORY_PER_BIN) {
+                 const oldest = await History.find({ binId }).sort({ timestamp: 1 }).limit(count - MAX_HISTORY_PER_BIN);
+                 await History.deleteMany({ _id: { $in: oldest.map(o => o._id) } });
+             }
+        }).catch(err => console.log("History logging error", err));
+        
+        endpoint = await Endpoint.findOne({ binId, key });
+    } else {
+        const bin = getOrCreateBinMemory(binId);
+        historyData.id = Date.now().toString();
+        historyData.timestamp = new Date().toISOString();
+        bin.history.unshift(historyData);
+        if (bin.history.length > MAX_HISTORY_PER_BIN) bin.history.pop();
+        
+        endpoint = bin.endpoints[key];
+    }
 
     if (endpoint) {
         let returnBody = endpoint.responseBody;
@@ -197,15 +214,13 @@ app.all('/b/:binId/*', (req, res) => {
         }
         res.status(endpoint.responseStatus).type('json').send(returnBody);
     } else {
-        // Wildcard fallback response so tests never hard-fail unnecessarily
         res.status(200).json({
             message: "Success! Freeceptor captured your request, but no mock rule was found.",
             dynamicId: Math.random().toString(36).substring(7),
             requestedMethod: method,
             requestedPath: requestPath,
             status: "success",
-            timestamp: new Date().toISOString(),
-            tip: `Go to your dashboard to define the rule for [${method}] ${requestPath}`
+            timestamp: new Date().toISOString()
         });
     }
 });
