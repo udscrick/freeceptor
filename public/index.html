@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Freeceptor - Premium API Mocking</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/style.css">
+    <style>
+        .bin-info {
+            background: rgba(109, 40, 217, 0.15);
+            border: 1px solid var(--primary);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+        }
+        .bin-url {
+            font-family: monospace;
+            color: var(--secondary);
+            font-size: 1.1rem;
+            word-break: break-all;
+        }
+        .btn-sm {
+            padding: 0.5rem 1rem;
+            font-size: 0.85rem;
+        }
+        .header-actions {
+            display: flex;
+            gap: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-background">
+        <div class="gradient-sphere sphere-1"></div>
+        <div class="gradient-sphere sphere-2"></div>
+    </div>
+
+    <nav class="glass-nav">
+        <div class="nav-content">
+            <h1 class="logo">Freeceptor<span class="dot">.</span></h1>
+            <div class="nav-links">
+                <a href="#" class="active" id="tab-endpoints">Endpoints</a>
+                <a href="#" id="tab-history">Request History</a>
+                <a href="#" id="tab-new-workspace">New Workspace</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container">
+        <!-- Bin Info Banner -->
+        <div class="bin-info glass-card">
+            <div>
+                <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:0.2rem;">Your Dedicated Base URL</div>
+                <div class="bin-url" id="display-bin-url">Loading...</div>
+            </div>
+            <button id="btn-copy-url" class="btn-primary btn-sm">Copy Link</button>
+        </div>
+
+        <!-- Endpoints View -->
+        <section id="view-endpoints" class="view active">
+            <div class="header-action">
+                <div class="section-title">
+                    <h2>Mock Rules</h2>
+                    <p>When you hit your Base URL, it will intercept traffic and reply using these rules.</p>
+                </div>
+                <button id="btn-add-rule" class="btn-primary">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                    New Rule
+                </button>
+            </div>
+
+            <div class="glass-card table-container">
+                <table id="endpoints-table">
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Path</th>
+                            <th>Status Code</th>
+                            <th>Response Type</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="endpoints-body">
+                        <!-- Rules will be populated here -->
+                    </tbody>
+                </table>
+                <div id="no-endpoints" class="empty-state hidden">
+                    <div class="empty-icon">✨</div>
+                    <h3>No mock rules defined in this workspace</h3>
+                    <p>Create your first mock endpoint to start returning custom JSON.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- History View -->
+        <section id="view-history" class="view hidden">
+            <div class="header-action">
+                <div class="section-title">
+                    <h2>Live Requests</h2>
+                    <p>Monitor incoming traffic to your base URL in real-time.</p>
+                </div>
+                <div class="header-actions">
+                    <button id="btn-clear-history" class="btn-secondary">Clear</button>
+                    <button id="btn-refresh-history" class="btn-primary">Refresh</button>
+                </div>
+            </div>
+
+            <div class="glass-card history-container" id="history-list">
+                <!-- History items will be populated here -->
+                <div id="no-history" class="empty-state">
+                    <div class="empty-icon">📡</div>
+                    <h3>Listening for requests...</h3>
+                    <p>Send a request to your dedicated Base URL to see it here.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Add Rule Modal -->
+    <div id="modal-add-rule" class="modal-overlay hidden">
+        <div class="modal glass-card">
+            <div class="modal-header">
+                <h3>Create Mock Rule</h3>
+                <button class="btn-close" id="btn-close-modal">✕</button>
+            </div>
+            <form id="form-add-rule">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Method</label>
+                        <select id="rule-method" required>
+                            <option value="GET">GET</option>
+                            <option value="POST">POST</option>
+                            <option value="PUT">PUT</option>
+                            <option value="DELETE">DELETE</option>
+                            <option value="PATCH">PATCH</option>
+                        </select>
+                    </div>
+                    <div class="form-group flex-2">
+                        <label>Path (e.g. /users/1)</label>
+                        <input type="text" id="rule-path" placeholder="/api/endpoint" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Status</label>
+                        <input type="number" id="rule-status" value="200" required>
+                    </div>
+                </div>
+
+                <div class="form-group toggle-group">
+                    <label class="switch">
+                        <input type="checkbox" id="rule-random">
+                        <span class="slider round"></span>
+                    </label>
+                    <div class="toggle-text">
+                        <strong>Generate Random Data</strong>
+                        <span>Return dynamic, randomly generated mock structures.</span>
+                    </div>
+                </div>
+
+                <div class="form-group" id="json-body-group">
+                    <label>Response Body (JSON)</label>
+                    <textarea id="rule-body" placeholder='{&#10;  "status": "success",&#10;  "data": []&#10;}' rows="8"></textarea>
+                </div>
+
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="btn-cancel-rule">Cancel</button>
+                    <button type="submit" class="btn-primary">Save Rule</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast hidden">Action successful</div>
+
+    <script src="/js/main.js"></script>
+</body>
+</html>
